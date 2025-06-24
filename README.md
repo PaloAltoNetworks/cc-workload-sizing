@@ -1,6 +1,6 @@
-# Prisma Cloud Sizing Scripts
+# Cortex Cloud Workload Sizing Scripts
 
-This repository contains cloud provider-specific sizing scripts for Prisma Cloud. These scripts help determine the scale and scope of cloud resources that need to be secured, enabling accurate licensing and resource planning.
+This repository contains cloud provider-specific sizing scripts for Cortex Cloud. These scripts help determine the scale and scope of cloud resources that need to be secured, enabling accurate licensing and resource planning. Calculations used to determine workload counts are incorporated into the scripts.
 
 ## Supported Cloud Providers
 
