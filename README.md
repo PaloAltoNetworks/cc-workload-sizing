@@ -66,7 +66,7 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
    az account list
    az account set --subscription "Subscription Name"
    ```
-
+   
 2. Required Permissions:
    - For standalone subscription:
      * Reader role
@@ -118,9 +118,7 @@ All scripts provide the following capabilities:
 - Compute resource counting (VMs, containers, etc.)
 - Data resource detection (databases, storage)
 - Region-specific filtering (where applicable)
-- Direct instance/VM inspection
-- Service availability verification
-- Performance monitoring and metrics
+
 
 ## Command Line Options
 
@@ -128,123 +126,48 @@ All scripts support a standardized set of options:
 
 | Option | Description |
 |--------|-------------|
-| -c | Connect mode for direct database inspection |
-| ~~-d~~ | ~~DSPM (Data Security Posture Management) mode~~ |
 | -h | Display help information |
 | -n | Region filter (AWS/Azure) |
 | -o | Organization mode for tenant-wide scanning |
 | -r | Role specification for cross-account access |
-| -s | Include stopped/terminated instances |
 
 ## Provider-Specific Usage
 
 ### AWS
 ```bash
-./pcs_aws_sizing.sh [-c] [-d] [-h] [-n region] [-o] [-r role] [-s]
+./cc_aws_sizing.sh [-h] [-n region] [-o] [-r role]
 
 # Examples:
 # Scan entire organization
-./pcs_aws_sizing.sh -o
-
-# Scan specific region with DSPM
-./pcs_aws_sizing.sh -n us-east-1 -d
+./cc_aws_sizing.sh -o
 
 # Cross-account scan with role
-./pcs_aws_sizing.sh -o -r PrismaCloudRole
+./cc_aws_sizing.sh -o -r CustomerOrgCloudRole
 ```
 
 ### Azure
 ```bash
-./pcs_azure_sizing.sh [-c] [-d] [-h] [-n region] [-o] [-r role] [-s]
+./cc_azure_sizing.sh [-h] [-n region] [-o] [-r role]
 
 # Examples:
 # Tenant-wide scan
-./pcs_azure_sizing.sh -o
+./cc_azure_sizing.sh -o
 
-# Region-specific DSPM scan
-./pcs_azure_sizing.sh -n eastus -d
-
-# Include stopped VMs
-./pcs_azure_sizing.sh -o -s
+# Region-specific scan
+./cc_azure_sizing.sh -n eastus
 ```
 
 ### GCP
 ```bash
-./pcs_gcp_sizing.sh [-c] [-d] [-h] [-o] [-r role] [-s]
+./cc_gcp_sizing.sh [-h] [-n region] [-o] [-r role]
 
 # Examples:
 # Organization scan
-./pcs_gcp_sizing.sh -o
-
-# DSPM mode with stopped instances
-./pcs_gcp_sizing.sh -d -s
+./cc_gcp_sizing.sh -o
 
 # Cross-project scan with role
-./pcs_gcp_sizing.sh -o -r PrismaCloudRole
+./cc_gcp_sizing.sh -o -r CustomerOrgCloudRole
 ```
 
-## Resource Detection
-
-The scripts perform comprehensive resource detection including:
-
-- Compute Resources:
-  - Virtual Machines/Instances
-  - Container Instances
-  - Serverless Functions
-  - Managed Services
-
-- Data Resources:
-  - Databases (including port scanning)
-  - Storage Services
-  - Data Warehouses
-  - Caching Services
-
-## Performance Considerations
-
-The scripts include built-in performance monitoring:
-- Execution time tracking
-- Memory usage monitoring
-- API call counting
-- Resource usage statistics
-- Rate limit tracking
-
-For large environments:
-- Use region filtering when possible
-- Consider running in segments
-- Monitor API rate limits
-- Be aware of memory usage with large resource sets
-- Observe concurrent operation limits
-
-## Output Format
-
-Scripts provide standardized output including:
-- Resource counts by type
-- Database detection results
-- Service availability status
-- Performance metrics
-- Error reporting and status messages
-- Rate limit statistics
-
-## Error Handling
-
-Scripts include comprehensive error handling for:
-- API failures with retries
-- Permission issues
-- Resource access problems
-- Rate limiting
-- Service availability
-- Timeout management
-- Resource cleanup
-- Session management
-
-## Support
-
-For issues or questions, please refer to:
-- Provider-specific README files in each directory
-- Testing documentation for validation procedures
-- Performance monitoring documentation for optimization
-- Error handling documentation for troubleshooting
-
 ## License
-
-These scripts are proprietary to Prisma Cloud and should be used in accordance with your licensing agreement.
+These scripts are proprietary to Cortex Cloud and should be used in accordance with your licensing agreement.
