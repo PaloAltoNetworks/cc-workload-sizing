@@ -404,7 +404,7 @@ while read -r subscription; do
     check_error $? "Failed to get current Azure subscription ID. Please ensure you are logged in."
     count_resources "$current_subscription"
 
-    echo "    SUMMARY WORKLOAD COUNTS FOR: $sub_name (ID: $sub_id): --"
+    echo "    SUMMARY WORKLOAD COUNTS FOR: $sub_name (ID: $sub_id)"
     echo "     VM workloads: $total_vm_instances"
     echo "     VM (container) workloads: $total_aks_workloads_sub"
     echo "     Serverless workloads: $total_serverless_workloads_sub"
