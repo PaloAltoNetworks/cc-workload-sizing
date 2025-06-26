@@ -10,6 +10,21 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
 - OCI (Outstanding)
 - Alibaba Cloud (Outstanding)
 
+## Calculated Workloads
+- VMs
+- VMs running containers
+- CaaS
+- Serverless functions
+- Container Images in Registries
+- Cloud Buckets
+- Managed Cloud Databases
+
+## *NOT* Calculated Workloads
+- DBaaS TB stored
+- SaaS Users
+- Cloud ASM assets
+
+
 ## Prerequisites
 
 - Cloud provider CLI tools must be installed and configured:
