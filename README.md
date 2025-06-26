@@ -20,9 +20,6 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
   - jq (JSON processing)
   - grep, cut, wc, sed (text processing)
   - ps (process monitoring)
-  - date (performance timing)
-  - timeout (operation limits)
-  - mktemp (secure temporary files)
 - Appropriate cloud provider permissions/roles for:
   - Organization-wide scanning
   - Cross-account access
