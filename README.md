@@ -6,7 +6,7 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
 
 - AWS
 - Azure
-- GCP
+- GCP (In Progress)
 - OCI (Outstanding)
 - Alibaba Cloud (Outstanding)
 
