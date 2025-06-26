@@ -29,15 +29,12 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
 ## Credential Setup
 
 ### AWS
-1. Console Setup:
-   ```bash
-   aws configure
-   # Enter your AWS Access Key ID
-   # Enter your AWS Secret Access Key
-   # Enter your default region
-   # Enter your preferred output format (json recommended)
-   ```
-
+1. AWS CloudShell Usage:
+   - Navigate to AWS CloudShell in AWS Console
+   - Upload script: Use CloudShell's "Actions" menu → "Upload file"
+   - Make executable: `chmod +x pcs_aws_sizing.sh`
+   - Run script (all prerequisites are pre-installed)
+     
 2. Required Permissions:
    - For standalone account:
      * ReadOnlyAccess
@@ -47,23 +44,14 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
      * ReadOnlyAccess in member accounts
      * AWSSystemsManagerReadOnlyAccess in member accounts (if using -c flag)
 
-3. AWS CloudShell Usage:
-   - Navigate to AWS CloudShell in AWS Console
-   - Upload script: Use CloudShell's "Actions" menu → "Upload file"
-   - Make executable: `chmod +x pcs_aws_sizing.sh`
-   - Run script (all prerequisites are pre-installed)
-
 ### Azure
-1. Console Setup:
-   ```bash
-   az login
-   # Follow the browser prompt to authenticate
-   
-   # For organization scanning:
-   az account list
-   az account set --subscription "Subscription Name"
-   ```
-   
+1. Azure Cloud Shell Usage:
+   - Open Azure Cloud Shell in Azure Portal
+   - Select Bash environment
+   - Upload script: Use Cloud Shell's upload button or drag-and-drop
+   - Make executable: `chmod +x pcs_azure_sizing.sh`
+   - Run script (all prerequisites are pre-installed)
+     
 2. Required Permissions:
    - For standalone subscription:
      * Reader role
@@ -72,24 +60,13 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
      * Reader role on Management Group level
      * VM Reader role on Management Group level (if using -c flag)
 
-3. Azure Cloud Shell Usage:
-   - Open Azure Cloud Shell in Azure Portal
-   - Select Bash environment
-   - Upload script: Use Cloud Shell's upload button or drag-and-drop
-   - Make executable: `chmod +x pcs_azure_sizing.sh`
-   - Run script (all prerequisites are pre-installed)
-
 ### GCP
-1. Console Setup:
-   ```bash
-   gcloud auth login
-   # Follow the browser prompt to authenticate
-   
-   # For organization scanning:
-   gcloud organizations list
-   gcloud config set organization <org-id>
-   ```
-
+1. Google Cloud Shell Usage:
+   - Open Cloud Shell in Google Cloud Console
+   - Upload script: Use Cloud Shell's "Upload file" button
+   - Make executable: `chmod +x pcs_gcp_sizing.sh`
+   - Run script (all prerequisites are pre-installed)
+     
 2. Required Permissions:
    - For standalone project:
      * Viewer role
@@ -101,12 +78,6 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
      * Project Viewer role
      * Compute Viewer role
      * Security Reviewer role
-
-3. Google Cloud Shell Usage:
-   - Open Cloud Shell in Google Cloud Console
-   - Upload script: Use Cloud Shell's "Upload file" button
-   - Make executable: `chmod +x pcs_gcp_sizing.sh`
-   - Run script (all prerequisites are pre-installed)
 
 ## Common Features
 
