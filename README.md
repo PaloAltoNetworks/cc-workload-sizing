@@ -19,10 +19,17 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
 - Cloud Buckets
 - Managed Cloud Databases
 
-## *NOT* Calculated Workloads
+## Limitations
+*NOT* Calculated Workloads as no direct way to calculate from CLI (maybe solvable with entry of API key)
 - DBaaS TB stored
 - SaaS Users
 - Cloud ASM assets
+
+CSP Cloud Shells Timeouts (could impact very large accounts):  
+- [AWS](https://docs.aws.amazon.com/cloudshell/latest/userguide/limits.html#:~:text=Inactive%20sessions%3A%20AWS%20CloudShell%20is,minutes%2C%20your%20shell%20session%20ends.) 30min  
+- [Azure](https://learn.microsoft.com/en-us/azure/cloud-shell/faq-troubleshooting) 20min  
+- [GCP](https://cloud.google.com/shell/docs/quotas-limits#non-interactive_usage) 40min   
+
 
 
 ## Prerequisites
