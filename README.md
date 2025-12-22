@@ -1,8 +1,3 @@
-~# RELOCATED TO HERE:~
-~https://spring.paloaltonetworks.com/leichenbaum/cc-workload-sizing~
-
-~Please consolidate all Cortex Cloud Workload Sizing efforts to this repo~
-
 # Cortex Cloud Workload Sizing Scripts
 
 This repository contains cloud provider-specific sizing scripts for Cortex Cloud. These scripts help determine the scale and scope of cloud resources that need to be secured, enabling accurate licensing and resource planning. Calculations used to determine workload counts are incorporated into the scripts.
