@@ -1,0 +1,27 @@
+dataset = asset_inventory 
+// 1. Filter early for optimization
+| filter xdm.asset.type.category in ("Storage Bucket", "Database", "VM Instance", "Serverless Function", "Container Image")
+| filter xdm.asset.type.id not in("RUNTIME_IMAGE","CORE_IMAGE","BUILD_IMAGE") // Only include "REGISTRY_IMAGE"'s
+// 2. Aggregate counts by Category
+| comp count() as Total by xdm.asset.type.category
+| fields Total, xdm.asset.type.category as Category
+// 3. Isolate VM count into a helper field (0 for non-VM rows)
+| alter vm_helper = if(Category = "VM Instance", Total, 0)
+// 4. Use windowcomp to sum the helper column across ALL rows, making 'vm_total' available to the Container row
+| windowcomp sum(vm_helper) sort asc Category between null and null as vm_total
+// 5. Perform the specific calculations
+| alter Required_Licenses = if(
+    Category = "Container Image", 
+        if( 
+            subtract(Total, multiply(vm_total, 10)) <= 0, // Check: Count - (VM * 10) <= 0
+            0, // If result <= 0, License is 0
+            round(divide(Total, 10)) // Else, License is Count / 10
+        ),
+    Category = "Database", round(divide(Total , 2)),
+    Category = "Storage Bucket", round(divide(Total , 10)),
+    Category = "Serverless Function", round(divide(Total, 25)),
+    Category = "VM Instance", round(divide(Total, 1)),
+    0 // Default
+)
+| fields Category, Total, Required_Licenses | sort desc Required_Licenses 
+| view graph type = pie xaxis = Category yaxis = Required_Licenses 
