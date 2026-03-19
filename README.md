@@ -24,6 +24,7 @@ This repository contains cloud provider-specific sizing scripts for Cortex Cloud
 - DBaaS TB stored
 - SaaS Users
 - Cloud ASM assets
+- Code repository active developers. The [RedShirts](https://github.com/bridgecrewio/redshirts) repository should be used for this calculation.
 
 CSP Cloud Shells Timeouts (could impact very large accounts):  
 - [AWS](https://docs.aws.amazon.com/cloudshell/latest/userguide/limits.html#:~:text=Inactive%20sessions%3A%20AWS%20CloudShell%20is,minutes%2C%20your%20shell%20session%20ends.) 30min  
