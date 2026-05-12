@@ -161,19 +161,16 @@ while read -r subscription; do
         local aks_node_count=0
         local aks_clusters=""
         if [[ "${LOCATION}" ]]; then
-            aks_clusters=$(az aks list --query "[?location=='$LOCATION'].name" --output tsv)
+            aks_clusters=$(az aks list --query "[?location=='$LOCATION'].[name,resourceGroup]" --output tsv)
             check_error $? "    Failed to list AKS clusters in location $LOCATION."
         else
-            aks_clusters=$(az aks list --query "[].name" --output tsv)
+            aks_clusters=$(az aks list --query "[].[name,resourceGroup]" --output tsv)
             check_error $? "    Failed to list AKS clusters across all locations."
         fi
 
-        for cluster_name in $aks_clusters; do
+        while IFS=$'\t' read -r cluster_name cluster_rg; do
+            [ -z "$cluster_name" ] && continue
             echo "  Checking AKS cluster: $cluster_name"
-            # Get the resource group of the cluster to query node pools
-            # This part needs a rework to correctly identify the resource group for the AKS cluster.
-            # A more robust way is to query az aks show for the 'nodeResourceGroup'
-            local cluster_rg=$(az aks show --name "$cluster_name" --query "resourceGroup" -o tsv 2>/dev/null)
             if [ -z "$cluster_rg" ]; then
                 echo "    Warning: Could not determine resource group for AKS cluster '$cluster_name'. Skipping node pool count."
                 continue
@@ -192,7 +189,7 @@ while read -r subscription; do
                     echo "    Node pool '$pool_name' in cluster '$cluster_name': $desired_node_count nodes"
                 fi
             done
-        done
+        done <<< "$aks_clusters"
         total_aks_nodes=$((total_aks_nodes + aks_node_count))
         aks_workloads=$total_aks_nodes
         total_aks_workloads_sub=$((total_aks_workloads_sub + aks_workloads))
