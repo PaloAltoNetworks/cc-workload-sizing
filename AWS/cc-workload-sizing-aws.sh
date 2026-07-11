@@ -40,7 +40,15 @@ function printHelp {
   exit 1
 }
 
-echo "$(tput bold)$(tput setaf 2)";echo "   ___  _                 _   ___                     _ _         ";echo "  / __\___ _ __| |_   _____ __   / __\ | ___  _   _  __| |";echo " / /  / _ \| '__| __/ _ \ \/ /  / /  | |/ _ \| | | |/ _\` |";echo "/ /__| (_) | |  | ||  __/>  <  / /___| | (_) | |_| | (_| |";echo "\____/\___/|_|   \__\___\/_/\_\ \____/|_|\___/ \__,_|\__,_|";echo "                                                           ";echo "                                                          ";echo "$(tput sgr0)";
+echo "$(tput bold)$(tput setaf 2)";
+echo "   ___           _                ___ _                 _ ";
+echo "  / __\___  _ __| |_ _____  __   / __\ | ___  _   _  __| |";
+echo " / /  / _ \| '__| __/ _ \ \/ /  / /  | |/ _ \| | | |/ _\` |";
+echo "/ /__| (_) | |  | ||  __/>  <  / /___| | (_) | |_| | (_| |";
+echo "\____/\___/|_|   \__\___/_/\_\ \____/|_|\___/ \__,_|\__,_|";
+echo "                                                          ";
+echo "                                                          ";
+echo "$(tput sgr0)";
 
 # Ensure AWS CLI is configured
 aws sts get-caller-identity > /dev/null 2>&1
