@@ -13,12 +13,24 @@ function check_error {
     local message=$2
     if [ $exit_code -ne 0 ]; then
         echo "Error: $message (Exit Code: $exit_code)"
-        # Optionally unset credentials if in org mode before exiting
-        if [ "$ORG_MODE" == true ] && [ -n "$AWS_SESSION_TOKEN" ]; then
-            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+        # Avoid leaving temporary credentials in effect before exiting.
+        if [ "$ORG_MODE" == true ]; then
+            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
         fi
         exit $exit_code
     fi
+}
+
+# Function to print hint for SSO login
+function print_sso_login_hint {
+    echo ""
+    echo "HINT: To use -o (Organization mode) with AWS SSO, you must first log in."
+    if [ -n "$SSO_PROFILE" ]; then
+        echo "Try running: aws sso login --profile $SSO_PROFILE"
+    else
+        echo "Try running: aws sso login --profile <your_sso_profile>"
+    fi
+    echo ""
 }
 
 function printHelp {
@@ -30,12 +42,15 @@ function printHelp {
   echo ""
   echo "Available flags:"
   echo "  -h Display the help info"
-  echo "  -n <region> Single region to scan (e.g. us-east-1)"
+  echo "  -n <region> Single region to scan"
+  echo "  -R <regions> Comma-separated region list to scan; skips AWS region discovery"
   echo "  -o Organization mode"
-  echo "     This option will fetch all sub-accounts associated with an organization"
-  echo "     and assume the default cross account role in order to iterate through and"
-  echo "     scan resources in each sub-account."
-  echo "  -r <role> Specify a non default role to assume in combination with organization mode"
+  echo "     This option will use your cached AWS SSO login to fetch every account"
+  echo "     assigned to you, then directly request credentials for the default"
+  echo "     (or specified) SSO role/permission set in each account."
+  echo "  -p <profile> Optional source AWS SSO profile/session used to locate the cached login"
+  echo "     token. This is one SSO login profile, not one profile per account."
+  echo "  -r <role> Specify a non-default SSO role/permission set in organization mode"
   echo ""
   exit 1
 }
@@ -50,22 +65,26 @@ echo "                                                          ";
 echo "                                                          ";
 echo "$(tput sgr0)";
 
-# Ensure AWS CLI is configured
-aws sts get-caller-identity > /dev/null 2>&1
-check_error $? "AWS CLI not configured or credentials invalid. Please run 'aws configure'."
-
 # Initialize options
 ORG_MODE=false
-ROLE="OrganizationAccountAccessRole"
+ROLE="AWSReadOnlyAccess"
 REGION=""
+REGION_LIST=""
+MANUAL_REGIONS=""
 STATE="running,stopped"
+SSO_PROFILE=""
+SSO_ACCESS_TOKEN=""
+SSO_REGION=""
+SSO_START_URL=""
 
 # Get options
-while getopts ":dhn:or:s" opt; do
+while getopts ":dhn:oR:p:r:s" opt; do
   case ${opt} in
     h) printHelp ;;
     n) REGION="$OPTARG" ;;
     o) ORG_MODE=true ;;
+    R) REGION_LIST="$OPTARG" ;;
+    p) SSO_PROFILE="$OPTARG" ;;
     r) ROLE="$OPTARG" ;;
     s) STATE="running,stopped" ;;
     \*) echo "Invalid option: -$OPTARG" && printHelp exit ;;
@@ -73,31 +92,26 @@ while getopts ":dhn:or:s" opt; do
 done
 shift $((OPTIND-1))
 
-# Get enabled regions for the current account context
-echo "Fetching enabled regions for the account..."
-activeRegions=$(aws account list-regions --region-opt-status-contains ENABLED ENABLED_BY_DEFAULT --query "Regions[].RegionName" --output text)
-check_error $? "Failed to list enabled AWS regions. Ensure 'account:ListRegions' permission is granted."
-
-if [ -z "$activeRegions" ]; then
-    echo "Error: Could not retrieve list of enabled regions."
+if [ -n "$REGION" ] && [ -n "$REGION_LIST" ]; then
+    echo "Error: -n <region> and -R <regions> cannot be used together."
     exit 1
 fi
 
-# Validate region flag
-if [[ "${REGION}" ]]; then
-    if echo "$activeRegions" | grep -qw "$REGION"; then
-        echo "Requested region ($REGION) is valid."
-    else
-        echo "Invalid region requested: $REGION";
+if [ -n "$REGION_LIST" ]; then
+    MANUAL_REGIONS=$(echo "$REGION_LIST" | tr ',' ' ' | xargs)
+    if [ -z "$MANUAL_REGIONS" ]; then
+        echo "Error: -R requires at least one region."
         exit 1
     fi
-else
-    echo "Enabled regions found: $activeRegions"
 fi
 
 if [ "$ORG_MODE" == true ]; then
   echo "Organization mode active"
-  echo "Role to assume: $ROLE"
+  echo "SSO role/permission set to use: $ROLE"
+else
+  # Ensure AWS CLI is configured for standalone mode.
+  aws sts get-caller-identity > /dev/null 2>&1
+  check_error $? "AWS CLI not configured or credentials invalid. Please run 'aws configure'."
 fi
 
 # Global Counters
@@ -122,24 +136,51 @@ count_resources() {
     local account_id=$1
 
     if [ "$ORG_MODE" == true ]; then
-        creds=$(aws sts assume-role --role-arn "arn:aws:iam::$account_id:role/$ROLE" --role-session-name "OrgSession" --query "Credentials" --output json 2> /dev/null)
-        local assume_role_exit_code=$?
+        # Use SSO access token to fetch credentials for the account/role combo.
+        creds_json=$(aws sso get-role-credentials \
+            --access-token "$SSO_ACCESS_TOKEN" \
+            --region "$SSO_REGION" \
+            --account-id "$account_id" \
+            --role-name "$ROLE" \
+            --output json 2>/dev/null)
+        local exit_code=$?
 
-        if [ $assume_role_exit_code -ne 0 ] || [ -z "$creds" ]; then
-            echo "  Warning: Unable to assume role in account $account_id. Skipping account..."
+        if [ $exit_code -ne 0 ] || [ -z "$creds_json" ]; then
+            echo "  Warning: Unable to get credentials for role '$ROLE' in account $account_id. Skipping account..."
             return
         fi
 
-        export AWS_ACCESS_KEY_ID=$(echo $creds | jq -r ".AccessKeyId")
-        export AWS_SECRET_ACCESS_KEY=$(echo $creds | jq -r ".SecretAccessKey")
-        export AWS_SESSION_TOKEN=$(echo $creds | jq -r ".SessionToken")
+        export AWS_ACCESS_KEY_ID=$(echo "$creds_json" | jq -r ".roleCredentials.accessKeyId")
+        export AWS_SECRET_ACCESS_KEY=$(echo "$creds_json" | jq -r ".roleCredentials.secretAccessKey")
+        export AWS_SESSION_TOKEN=$(echo "$creds_json" | jq -r ".roleCredentials.sessionToken")
     fi
 
     echo ""
     echo "Counting Cloud Security resources in account: $account_id"
 
-    # Define regions to scan for this execution
-    if [[ -n "${REGION}" ]]; then
+    # Only fetch active regions for the first account or if not using manual regions.
+    if [ -z "$MANUAL_REGIONS" ]; then
+        if [ -z "$activeRegions" ]; then
+            echo "Fetching enabled regions for the account..."
+            activeRegions=$(aws account list-regions --region-opt-status-contains ENABLED ENABLED_BY_DEFAULT --query "Regions[].RegionName" --output text 2>/dev/null)
+            if [ $? -ne 0 ] || [ -z "$activeRegions" ]; then
+                 echo "Warning: Could not fetch active regions for account $account_id. Will fallback to basic region list."
+                 activeRegions="us-east-1 us-east-2 us-west-1 us-west-2"
+            fi
+        fi
+        
+        # Validate -n region if provided
+        if [ -n "$REGION" ]; then
+            if ! echo "$activeRegions" | grep -qw "$REGION"; then
+                echo "Warning: Requested region $REGION does not appear to be enabled for account $account_id. Proceeding anyway."
+            fi
+        fi
+    fi
+
+    # Determine which regions to scan
+    if [[ -n "${MANUAL_REGIONS}" ]]; then
+        SCAN_REGIONS="$MANUAL_REGIONS"
+    elif [[ -n "${REGION}" ]]; then
         SCAN_REGIONS="$REGION"
     else
         SCAN_REGIONS="$activeRegions"
@@ -322,25 +363,105 @@ count_resources() {
     echo "   $(tput bold)$(tput setaf 2)PaaS Workloads: $paas_workloads$(tput sgr0)"
 
     # Unset temporary credentials
-    if [ "$ORG_MODE" == true ] && [ -n "$AWS_SESSION_TOKEN" ]; then
-        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    if [ "$ORG_MODE" == true ]; then
+        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
     fi
 }
 
 # Main logic
 if [ "$ORG_MODE" == true ]; then
-    accounts=$(aws organizations list-accounts --query "Accounts[?Status=='ACTIVE'].Id" --output text)
-    check_error $? "Failed to list accounts in the organization. Ensure you have 'organizations:ListAccounts' permission."
+    sso_session_info=$(python3 -c "
+import os, json, glob, datetime
+
+def find_sso_session():
+    sso_cache_dir = os.path.expanduser('~/.aws/sso/cache')
+    if not os.path.isdir(sso_cache_dir):
+        return None
+
+    # Sort files by modification time, newest first
+    json_files = sorted(glob.glob(os.path.join(sso_cache_dir, '*.json')), key=os.path.getmtime, reverse=True)
+    
+    for file_path in json_files:
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+                
+            # Check for a valid, non-expired accessToken
+            if 'accessToken' in data and 'expiresAt' in data:
+                # AWS CLI cache uses UTC (e.g., '2025-02-27T17:03:00UTC')
+                # A simple string comparison often works if we format current time similarly,
+                # but a robust check handles the 'UTC' or 'Z' suffix.
+                exp_str = data['expiresAt'].replace('UTC', '').replace('Z', '')
+                try:
+                    exp_time = datetime.datetime.strptime(exp_str, '%Y-%m-%dT%H:%M:%S')
+                except ValueError:
+                    continue # Skip if date format is unexpected
+
+                if exp_time > datetime.datetime.utcnow():
+                    # We found a valid token. Now we need the corresponding region.
+                    # This script relies on SSO_REGION being available, which is sometimes in the cache
+                    # or needs to be derived. The original script used a Python snippet that
+                    # expected region in the cache or provided as fallback.
+                    region = data.get('region', '')
+                    start_url = data.get('startUrl', '')
+                    return f\"{data['accessToken']}\\t{region}\\t{start_url}\"
+        except Exception:
+            continue
+    return None
+
+result = find_sso_session()
+if result:
+    print(result)
+" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$sso_session_info" ]; then
+        echo "Error: No valid cached AWS SSO login token found."
+        print_sso_login_hint
+        exit 1
+    fi
+
+    IFS=$'\t' read -r SSO_ACCESS_TOKEN SSO_REGION SSO_START_URL <<< "$sso_session_info"
+
+    if [ -z "$SSO_ACCESS_TOKEN" ] || [ -z "$SSO_REGION" ]; then
+        echo "Error: Cached AWS SSO login token is missing an access token or SSO region."
+        # If the region was missing in the cache JSON, we can try to fallback to AWS_REGION if set
+        if [ -n "$AWS_REGION" ] && [ -n "$SSO_ACCESS_TOKEN" ]; then
+            SSO_REGION="$AWS_REGION"
+            echo "Falling back to SSO Region from environment: $SSO_REGION"
+        elif [ -n "$AWS_DEFAULT_REGION" ] && [ -n "$SSO_ACCESS_TOKEN" ]; then
+            SSO_REGION="$AWS_DEFAULT_REGION"
+            echo "Falling back to SSO Region from environment: $SSO_REGION"
+        else
+            print_sso_login_hint
+            exit 1
+        fi
+    fi
+
+    if [ -n "$SSO_START_URL" ]; then
+        echo "Using cached AWS SSO session for $SSO_START_URL in $SSO_REGION"
+    else
+        echo "Using cached AWS SSO session in $SSO_REGION"
+    fi
+
+    # Get the list of accounts assigned to the cached SSO login.
+    accounts=$(aws sso list-accounts --access-token "$SSO_ACCESS_TOKEN" --region "$SSO_REGION" --query "accountList[].accountId" --output text 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to list accounts from AWS SSO."
+        print_sso_login_hint
+        exit 1
+    fi
 
     if [ -z "$accounts" ]; then
-        echo "No accounts found in the organization."
+        echo "No accounts found for the cached AWS SSO login."
         exit 0
     fi
 
+    # Loop through each SSO-assigned account.
     for account_id in $accounts; do
         count_resources "$account_id"
     done
 else
+    # Run for the standalone account
     current_account=$(aws sts get-caller-identity --query "Account" --output text)
     check_error $? "Failed to get caller identity for the current account."
     count_resources "$current_account"
