@@ -61,9 +61,8 @@ REGION=""
 STATE="running,stopped"
 
 # Get options
-while getopts ":cdhn:or:s" opt; do
+while getopts ":dhn:or:s" opt; do
   case ${opt} in
-    c) SSM_MODE=true ;;
     h) printHelp ;;
     n) REGION="$OPTARG" ;;
     o) ORG_MODE=true ;;
