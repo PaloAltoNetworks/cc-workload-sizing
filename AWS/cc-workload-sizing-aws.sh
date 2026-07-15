@@ -6,38 +6,53 @@ if ! command -v jq &> /dev/null; then
     echo "(e.g., 'sudo apt-get install jq' or 'sudo yum install jq' or 'brew install jq')"
     exit 1
 fi
+
 # Function to handle errors
 function check_error {
     local exit_code=$1
     local message=$2
     if [ $exit_code -ne 0 ]; then
         echo "Error: $message (Exit Code: $exit_code)"
-        # Optionally unset credentials if in org mode before exiting
-        if [ "$ORG_MODE" == true ] && [ -n "$AWS_SESSION_TOKEN" ]; then
-            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+        # Avoid leaving temporary credentials in effect before exiting.
+        if [ "$ORG_MODE" == true ]; then
+            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
         fi
         exit $exit_code
     fi
 }
 
+# Function to print hint for SSO login
+function print_sso_login_hint {
+    echo ""
+    echo "HINT: To use -o (Organization mode) with AWS SSO, you must first log in."
+    if [ -n "$SSO_PROFILE" ]; then
+        echo "Try running: aws sso login --profile $SSO_PROFILE"
+    else
+        echo "Try running: aws sso login --profile <your_sso_profile>"
+    fi
+    echo ""
+}
+
 function printHelp {
-    echo ""
-    echo "NOTES:"
-    echo "* Requires AWS CLI v2 to execute"
-    echo "* Requires JQ utility to be installed (TODO: Install JQ from script; exists in AWS)"
-    echo "* Validated to run successfully from within CSP console CLIs"
-    echo ""
-    echo "Available flags:"
-    echo " -h          Display the help info"
-    echo " -n <region> Single region to scan"
-    echo " -o          Organization mode"
-    echo "             This option will fetch all sub-accounts associated with an organization"
-    echo "             and assume the default (or specified) cross account role in order to iterate through and"
-    echo "             scan resources in each sub-account. This is typically run from the admin user in"
-    echo "             the master account."
-    echo " -r <role>   Specify a non default role to assume in combination with organization mode"
-    echo ""
-    exit 1
+  echo ""
+  echo "NOTES:"
+  echo "* Requires AWS CLI v2 to execute"
+  echo "* Requires JQ utility to be installed"
+  echo "* Validated to run successfully from within CSP console CLIs"
+  echo ""
+  echo "Available flags:"
+  echo "  -h Display the help info"
+  echo "  -n <region> Single region to scan"
+  echo "  -R <regions> Comma-separated region list to scan; skips AWS region discovery"
+  echo "  -o Organization mode"
+  echo "     This option will use your cached AWS SSO login to fetch every account"
+  echo "     assigned to you, then directly request credentials for the default"
+  echo "     (or specified) SSO role/permission set in each account."
+  echo "  -p <profile> Optional source AWS SSO profile/session used to locate the cached login"
+  echo "     token. This is one SSO login profile, not one profile per account."
+  echo "  -r <role> Specify a non-default SSO role/permission set in organization mode"
+  echo ""
+  exit 1
 }
 
 echo "$(tput bold)$(tput setaf 2)";
@@ -50,58 +65,56 @@ echo "                                                          ";
 echo "                                                          ";
 echo "$(tput sgr0)";
 
-# Ensure AWS CLI is configured
-aws sts get-caller-identity > /dev/null 2>&1
-check_error $? "AWS CLI not configured or credentials invalid. Please run 'aws configure'."
-
 # Initialize options
 ORG_MODE=false
-ROLE="OrganizationAccountAccessRole"
+ROLE="AWSReadOnlyAccess"
 REGION=""
+REGION_LIST=""
+MANUAL_REGIONS=""
 STATE="running,stopped"
+SSO_PROFILE=""
+SSO_ACCESS_TOKEN=""
+SSO_REGION=""
+SSO_START_URL=""
 
 # Get options
-while getopts ":cdhn:or:s" opt; do
+while getopts ":dhn:oR:p:r:s" opt; do
   case ${opt} in
-    c) SSM_MODE=true ;;
     h) printHelp ;;
     n) REGION="$OPTARG" ;;
     o) ORG_MODE=true ;;
+    R) REGION_LIST="$OPTARG" ;;
+    p) SSO_PROFILE="$OPTARG" ;;
     r) ROLE="$OPTARG" ;;
     s) STATE="running,stopped" ;;
-    *) echo "Invalid option: -${OPTARG}" && printHelp exit ;;
- esac
+    \*) echo "Invalid option: -$OPTARG" && printHelp exit ;;
+  esac
 done
 shift $((OPTIND-1))
 
-# Get active regions
-# Get enabled regions for the current account context
-echo "Fetching enabled regions for the account..."
-activeRegions=$(aws account list-regions --region-opt-status-contains ENABLED ENABLED_BY_DEFAULT --query "Regions[].RegionName" --output text)
-check_error $? "Failed to list enabled AWS regions. Ensure 'account:ListRegions' permission is granted."
-
-if [ -z "$activeRegions" ]; then
-    echo "Error: Could not retrieve list of enabled regions."
+if [ -n "$REGION" ] && [ -n "$REGION_LIST" ]; then
+    echo "Error: -n <region> and -R <regions> cannot be used together."
     exit 1
 fi
-echo "Enabled regions found: $activeRegions"
 
-# Validate region flag
-if [[ "${REGION}" ]]; then
-    # Use grep -w for whole word match to avoid partial matches (e.g., "us-east" matching "us-east-1")
-    if echo "$activeRegions" | grep -qw "$REGION";
-        then echo "Requested region is valid";
-    else echo "Invalid region requested: $REGION";
-    exit 1
-    fi 
+if [ -n "$REGION_LIST" ]; then
+    MANUAL_REGIONS=$(echo "$REGION_LIST" | tr ',' ' ' | xargs)
+    if [ -z "$MANUAL_REGIONS" ]; then
+        echo "Error: -R requires at least one region."
+        exit 1
+    fi
 fi
 
 if [ "$ORG_MODE" == true ]; then
   echo "Organization mode active"
-  echo "Role to assume: $ROLE"
+  echo "SSO role/permission set to use: $ROLE"
+else
+  # Ensure AWS CLI is configured for standalone mode.
+  aws sts get-caller-identity > /dev/null 2>&1
+  check_error $? "AWS CLI not configured or credentials invalid. Please run 'aws configure'."
 fi
 
-# Initialize counters
+# Global Counters
 total_ec2_instances=0
 total_eks_nodes=0
 total_s3_buckets=0
@@ -111,19 +124,11 @@ total_aurora=0
 total_rds=0
 total_dynamodb=0
 total_redshift=0
-total_ec2_db=0
-ec2_db_count=0
-paas_workloads=0
 total_paas_workloads=0
-caas_workloads=0
 total_caas_workloads=0
-container_image_workloads=0
 total_container_image_workloads=0
-serverless_workloads=0
 total_serverless_workloads=0
-eks_workloads=0
 total_eks_workloads=0
-s3_workloads=0
 total_s3_workloads=0
 
 # Function to count resources in a single account
@@ -131,346 +136,327 @@ count_resources() {
     local account_id=$1
 
     if [ "$ORG_MODE" == true ]; then
-        # Assume role in the account (replace "OrganizationAccountAccessRole" with your role name if different)
-        # Capture stderr to prevent it from cluttering the output if it fails
-        creds=$(aws sts assume-role --role-arn "arn:aws:iam::$account_id:role/$ROLE" \
-            --role-session-name "OrgSession" --query "Credentials" --output json 2> /dev/null)
-        local assume_role_exit_code=$?
+        # Use SSO access token to fetch credentials for the account/role combo.
+        creds_json=$(aws sso get-role-credentials \
+            --access-token "$SSO_ACCESS_TOKEN" \
+            --region "$SSO_REGION" \
+            --account-id "$account_id" \
+            --role-name "$ROLE" \
+            --output json 2>/dev/null)
+        local exit_code=$?
 
-        if [ $assume_role_exit_code -ne 0 ]; then
-            echo "  Warning: Unable to assume role '$ROLE' in account $account_id (Exit Code: $assume_role_exit_code). Skipping account..."
-            # No need to unset creds as they weren't successfully set
+        if [ $exit_code -ne 0 ] || [ -z "$creds_json" ]; then
+            echo "  Warning: Unable to get credentials for role '$ROLE' in account $account_id. Skipping account..."
             return
         fi
 
-        # Double check creds are not empty even if command succeeded
-        if [ -z "$creds" ]; then
-             echo "  Warning: Assumed role in account $account_id but credentials seem empty. Skipping account..."
-             return
-        fi
-
-        # Export temporary credentials
-        export AWS_ACCESS_KEY_ID=$(echo $creds | jq -r ".AccessKeyId")
-        export AWS_SECRET_ACCESS_KEY=$(echo $creds | jq -r ".SecretAccessKey")
-        export AWS_SESSION_TOKEN=$(echo $creds | jq -r ".SessionToken")
+        export AWS_ACCESS_KEY_ID=$(echo "$creds_json" | jq -r ".roleCredentials.accessKeyId")
+        export AWS_SECRET_ACCESS_KEY=$(echo "$creds_json" | jq -r ".roleCredentials.secretAccessKey")
+        export AWS_SESSION_TOKEN=$(echo "$creds_json" | jq -r ".roleCredentials.sessionToken")
     fi
 
     echo ""
     echo "Counting Cloud Security resources in account: $account_id"
-       
-    # Count EC2 instances
-    if [[ "${REGION}" ]]; then
-        ec2_count=$(aws ec2 describe-instances --region $REGION --filters "Name=instance-state-name,Values=$STATE" --query "Reservations[*].Instances[*]" --output json | jq 'length')
-        check_error $? "Failed to describe EC2 instances in region $REGION for account $account_id."
-    else
-        echo "  Counting EC2 instances across all accessible regions..."
-        ec2_count=0
-        # Use the activeRegions variable fetched earlier
-        for r in $activeRegions; do
-            # Capture stderr to avoid cluttering output for regions where API might not be enabled/accessible
-            count_in_region=$(aws ec2 describe-instances --region "$r" --filters "Name=instance-state-name,Values=$STATE" --query "Reservations[*].Instances[*]" --output json 2>/dev/null | jq 'length')
-            if [ $? -eq 0 ] && [[ "$count_in_region" =~ ^[0-9]+$ ]]; then
-                # Only print if count > 0 to reduce noise
-                if [ "$count_in_region" -gt 0 ]; then
-                    echo "    Region $r: $count_in_region instances"
-                fi
-                ec2_count=$((ec2_count + count_in_region))
-            fi
-        done
-    fi
-    echo "  $(tput bold)$(tput setaf 2)VM Workloads: $ec2_count$(tput sgr0)"
-    total_ec2_instances=$((total_ec2_instances + ec2_count))
-    total_ec2_workloads=$total_ec2_instances
 
-    # Count EKS nodes
-    if [[ "${REGION}" ]]; then
-        clusters=$(aws eks list-clusters --region $REGION --query "clusters" --output text)
-        check_error $? "Failed to list EKS clusters in region $REGION for account $account_id."
-    else
-        clusters=$(aws eks list-clusters --query "clusters" --output text)
-        check_error $? "Failed to list EKS clusters (all regions) for account $account_id."
-    fi        
-    for cluster in $clusters; do
-        node_groups=$(aws eks list-nodegroups --cluster-name "$cluster" --query 'nodegroups' --output text)
-        # If listing nodegroups fails, log warning and skip this cluster
-        if [ $? -ne 0 ]; then
-            echo "    Warning: Failed to list nodegroups for EKS cluster '$cluster' in account $account_id. Skipping cluster."
-            continue
-        fi
-        total_nodes=0
-        for node_group in $node_groups; do
-            node_count=$(aws eks describe-nodegroup --cluster-name "$cluster" --nodegroup-name "$node_group" --query "nodegroup.scalingConfig.desiredSize" --output text)
-            # If describing nodegroup fails, log warning and skip this nodegroup
-            if [ $? -ne 0 ]; then
-                echo "    Warning: Failed to describe nodegroup '$node_group' for cluster '$cluster' in account $account_id. Skipping nodegroup."
-                continue
+    # Only fetch active regions for the first account or if not using manual regions.
+    if [ -z "$MANUAL_REGIONS" ]; then
+        if [ -z "$activeRegions" ]; then
+            echo "Fetching enabled regions for the account..."
+            activeRegions=$(aws account list-regions --region-opt-status-contains ENABLED ENABLED_BY_DEFAULT --query "Regions[].RegionName" --output text 2>/dev/null)
+            if [ $? -ne 0 ] || [ -z "$activeRegions" ]; then
+                 echo "Warning: Could not fetch active regions for account $account_id. Will fallback to basic region list."
+                 activeRegions="us-east-1 us-east-2 us-west-1 us-west-2"
             fi
-            total_nodes=$((total_nodes + node_count))
-            echo "  EKS cluster '$cluster' nodegroup $node_group nodes: $node_count"
-            total_eks_nodes=$((total_eks_nodes + node_count))
-            eks_workloads=$total_nodes
-            total_eks_workloads=$((total_eks_nodes + eks_workloads))
-            echo "  $(tput bold)$(tput setaf 2)VM (Container) Workloads: $eks_workloads$(tput sgr0)"
+        fi
+        
+        # Validate -n region if provided
+        if [ -n "$REGION" ]; then
+            if ! echo "$activeRegions" | grep -qw "$REGION"; then
+                echo "Warning: Requested region $REGION does not appear to be enabled for account $account_id. Proceeding anyway."
+            fi
+        fi
+    fi
+
+    # Determine which regions to scan
+    if [[ -n "${MANUAL_REGIONS}" ]]; then
+        SCAN_REGIONS="$MANUAL_REGIONS"
+    elif [[ -n "${REGION}" ]]; then
+        SCAN_REGIONS="$REGION"
+    else
+        SCAN_REGIONS="$activeRegions"
+    fi
+
+    # 1. Count EC2 instances (Excluding EKS Nodes)
+    echo "   Counting EC2 instances..."
+    ec2_count=0
+    for r in $SCAN_REGIONS; do
+        count_in_region=$(aws ec2 describe-instances --region "$r" --filters "Name=instance-state-name,Values=$STATE" --query "Reservations[*].Instances[*]" --output json 2>/dev/null | jq '[flatten[] | select(.Tags == null or (.Tags | map(.Key | startswith("eks:") or startswith("kubernetes.io/cluster/")) | any | not))] | length')
+        if [ $? -eq 0 ] && [[ "$count_in_region" =~ ^[0-9]+$ ]] && [ "$count_in_region" -gt 0 ]; then
+            echo "     Region $r: $count_in_region standalone instances"
+            ec2_count=$((ec2_count + count_in_region))
+        fi
+    done
+    echo "   $(tput bold)$(tput setaf 2)Standalone VM Workloads: $ec2_count$(tput sgr0)"
+    total_ec2_instances=$((total_ec2_instances + ec2_count))
+
+    # 2. Count EKS nodes
+    echo "   Counting EKS nodes..."
+    for r in $SCAN_REGIONS; do
+        clusters=$(aws eks list-clusters --region "$r" --query "clusters" --output text 2>/dev/null)
+        for cluster in $clusters; do
+            node_groups=$(aws eks list-nodegroups --region "$r" --cluster-name "$cluster" --query 'nodegroups' --output text 2>/dev/null)
+            total_nodes=0
+            for node_group in $node_groups; do
+                node_count=$(aws eks describe-nodegroup --region "$r" --cluster-name "$cluster" --nodegroup-name "$node_group" --query "nodegroup.scalingConfig.desiredSize" --output text 2>/dev/null)
+                if [[ "$node_count" =~ ^[0-9]+$ ]]; then
+                    total_nodes=$((total_nodes + node_count))
+                    total_eks_nodes=$((total_eks_nodes + node_count))
+                fi
+            done
+            if [ "$total_nodes" -gt 0 ]; then
+                echo "     Region $r - EKS cluster '$cluster': $total_nodes nodes"
+            fi
         done
     done
+    total_eks_workloads=$total_eks_nodes
+    echo "   $(tput bold)$(tput setaf 2)VM (Container) Workloads: $total_eks_workloads$(tput sgr0)"
 
-    # Count Serverless Functions
+    # 3. Count Serverless Functions
     echo ""
-    echo "  Counting active and inactive serverless functions in AWS..."
-
-    # Initialize counters
+    echo "   Counting active and inactive serverless functions in AWS..."
     active_functions=0
     inactive_functions=0
+    for r in $SCAN_REGIONS; do
+        function_arns=$(aws lambda list-functions --region "$r" --query 'Functions[].FunctionArn' --output text 2>/dev/null)
+        if [ -n "$function_arns" ]; then
+            for arn in $function_arns; do
+                function_state_info=$(aws lambda get-function-configuration --region "$r" --function-name "$arn" --query '{State: State, LastUpdateStatus: LastUpdateStatus}' --output json 2>/dev/null)
+                state=$(echo "$function_state_info" | jq -r '.State')
+                last_update_status=$(echo "$function_state_info" | jq -r '.LastUpdateStatus')
 
-    # Get a list of all Lambda function ARNs
-    # The --query argument filters the output to only the FunctionArn and flattens the list.
-    # The --output text argument formats the output as plain text, one ARN per line.
-    function_arns=$(aws lambda list-functions --query 'Functions[].FunctionArn' --output text)
-
-    # Check if any functions were found
-    if [ -z "$function_arns" ]; then
-    echo "    No serverless functions found in your AWS account."
-    else
-    
-        # Loop through each function ARN to get its state
-        for arn in $function_arns; do
-        # Extract the function name from the ARN for easier reading in output
-        function_name=$(echo "$arn" | awk -F':' '{print $NF}')
-
-        # Get the function configuration, specifically the State and LastUpdateStatus
-        # We use jq to parse the JSON output and extract the relevant fields.
-        # .Configuration.State will be "Active", "Inactive", "Pending" etc.
-        # .Configuration.LastUpdateStatus will be "Successful", "Failed" etc.
-        function_state_info=$(aws lambda get-function-configuration --function-name "$arn" --query '{State: State, LastUpdateStatus: LastUpdateStatus}' --output json)
-
-        # Parse the state and last update status using jq
-        state=$(echo "$function_state_info" | jq -r '.State')
-        last_update_status=$(echo "$function_state_info" | jq -r '.LastUpdateStatus')
-
-        #echo "Function: $function_name, State: $state, LastUpdateStatus: $last_update_status"
-
-        # Determine if the function is active or inactive based on its state and last update status
-        if [[ "$state" == "Active" && "$last_update_status" == "Successful" ]]; then
-            active_functions=$((active_functions + 1))
-        else
-            inactive_functions=$((inactive_functions + 1))
-        fi
-        done
-        total_functions=$((active_functions + inactive_functions))
-        echo "    Total Serverless Functions: $total_functions"
-    fi
-
-    serverless_workloads=$(( (total_functions +25-1)/25 ))
-    if (( $total_functions == 0 )); then 
-        serverless_workloads=0
-    fi
-    total_serverless_workloads=$((total_serverless_workloads + serverless_workloads))
-    echo "  $(tput bold)$(tput setaf 2)Serverless Workloads: $serverless_workloads$(tput sgr0)"
-
-    # Count CaaS
-    echo ""
-    echo "  Counting managed container resources in AWS..."
-
-    # Initialize counters
-    ecs_fargate_services=0
-    apprunner_services=0
-    total_managed_containers=0
-
-    # List all ECS clusters
-    # We'll then iterate through each cluster to find Fargate services.
-    ecs_clusters=$(aws ecs list-clusters --query 'clusterArns[]' --output text)
-
-    if [ -z "$ecs_clusters" ]; then
-        echo "    No ECS clusters found."
-        else
-            for cluster_arn in $ecs_clusters; do
-                cluster_name=$(echo "$cluster_arn" | awk -F'/' '{print $NF}')
-                echo "    Checking cluster: $cluster_name"
-
-                # List services within the cluster
-                # We need to describe each service to check its launch type (Fargate vs. EC2)
-                service_arns=$(aws ecs list-services --cluster "$cluster_arn" --query 'serviceArns[]' --output text)
-
-                if [ -z "$service_arns" ]; then
-                    echo "      No services found in this cluster."
+                if [[ "$state" == "Active" && "$last_update_status" == "Successful" ]]; then
+                    active_functions=$((active_functions + 1))
                 else
-                for service_arn in $service_arns; do
-                    # Get service details to check launch type
-                    service_details=$(aws ecs describe-services --cluster "$cluster_arn" --services "$service_arn" --query 'services[0].launchType' --output text)
-
-                    if [ "$service_details" == "Fargate" ]; then
-                     ecs_fargate_services=$((ecs_fargate_services + 1))
-                      service_name=$(echo "$service_arn" | awk -F'/' '{print $NF}')
-                     echo "    Found Fargate Service: $service_name"
-                    fi
-                done
+                    inactive_functions=$((inactive_functions + 1))
                 fi
             done
         fi
+    done
+    account_total_functions=$((active_functions + inactive_functions))
+    total_functions=$((total_functions + account_total_functions))
+    
+    serverless_workloads=$(( (account_total_functions + 25 - 1) / 25 ))
+    if (( account_total_functions == 0 )); then serverless_workloads=0; fi
+    total_serverless_workloads=$((total_serverless_workloads + serverless_workloads))
+    
+    echo "   Total Serverless Functions: $account_total_functions"
+    echo "   $(tput bold)$(tput setaf 2)Serverless Workloads: $serverless_workloads$(tput sgr0)"
 
-        # List all App Runner services
-        apprunner_service_arns=$(aws apprunner list-services --query 'ServiceSummaryList[].ServiceArn' --output text)
-
-        if [ -z "$apprunner_service_arns" ]; then
-        echo "    No AWS App Runner services found."
-        else
-        for service_arn in $apprunner_service_arns; do
-            apprunner_services=$((apprunner_services + 1))
-            service_name=$(echo "$service_arn" | awk -F'/' '{print $NF}')
-            echo "    Found App Runner Service: $service_name"
+    # 4. Count CaaS
+    echo ""
+    echo "   Counting managed container resources (CaaS)..."
+    ecs_fargate_services=0
+    apprunner_services=0
+    
+    for r in $SCAN_REGIONS; do
+        # ECS Clusters
+        ecs_clusters=$(aws ecs list-clusters --region "$r" --query 'clusterArns[]' --output text 2>/dev/null)
+        for cluster_arn in $ecs_clusters; do
+            service_arns=$(aws ecs list-services --region "$r" --cluster "$cluster_arn" --query 'serviceArns[]' --output text 2>/dev/null)
+            for service_arn in $service_arns; do
+                service_details=$(aws ecs describe-services --region "$r" --cluster "$cluster_arn" --services "$service_arn" --query 'services[0].launchType' --output text 2>/dev/null)
+                if [ "$service_details" == "Fargate" ]; then
+                    ecs_fargate_services=$((ecs_fargate_services + 1))
+                fi
+            done
         done
-        fi
+        # App Runner
+        apprunner_service_arns=$(aws apprunner list-services --region "$r" --query 'ServiceSummaryList[].ServiceArn' --output text 2>/dev/null)
+        for arn in $apprunner_service_arns; do
+            apprunner_services=$((apprunner_services + 1))
+        done
+    done
 
-        total_managed_containers=$((ecs_fargate_services + apprunner_services))
-        caas_workloads=$[(total_managed_containers+10-1)/10]
-        if (( total_managed_containers=0 )); then 
-            caas_workloads=0
-        fi
-        total_caas_workloads=$((total_caas_workloads + caas_workloads))
-        echo "  $(tput bold)$(tput setaf 2)CaaS Workloads: $caas_workloads$(tput sgr0)"
-        echo ""
+    total_managed_containers=$((ecs_fargate_services + apprunner_services))
+    echo "   Total Managed Containers (CaaS): $total_managed_containers"
+    caas_workloads=$((total_managed_containers / 10))
+    total_caas_workloads=$((total_caas_workloads + caas_workloads))
+    echo "   $(tput bold)$(tput setaf 2)CaaS Workloads: $caas_workloads$(tput sgr0)"
 
-        # Count Container Images in Registries
-        echo "  Counting container images in all registries..."
+    # 5. Count Container Images 
+    echo ""
+    echo "   Counting ECR container images..."
+    total_images_in_account=0
+    for r in $SCAN_REGIONS; do
+        repository_names=$(aws ecr describe-repositories --region "$r" --query 'repositories[].repositoryName' --output text 2>/dev/null | tr '\t' '\n')
+        for repo_name in $repository_names; do
+            if [ -n "$repo_name" ]; then
+                image_count=$(aws ecr describe-images --region "$r" --repository-name "$repo_name" --query 'imageDetails[].imageDigest' --output text 2>/dev/null | wc -l)
+                total_images_in_account=$((total_images_in_account + image_count))
+                
+                # Formula matching original script per repo
+                container_image_workload=$(( image_count - ((ec2_count + total_eks_nodes) * 10) ))
+                if (( container_image_workload < 0 )); then container_image_workload=0; fi
+                total_container_image_workloads=$((total_container_image_workloads + container_image_workload))
+            fi
+        done
+    done
+    echo "   Total Images Across All Registries in Account: $total_images_in_account"
+    echo "   $(tput bold)$(tput setaf 2)Container Image Workloads: $total_container_image_workloads$(tput sgr0)"
+    echo ""
 
-        # Initialize a counter for the total number of images across all repositories
-        total_images_across_all_registries=0
+    # 6. Count S3 buckets (Global Resource - only evaluate once)
+    echo "   Counting up bucket workloads..."
+    # Grab the first region from SCAN_REGIONS to satisfy the AWS CLI region requirement
+    s3_target_region=$(echo "$SCAN_REGIONS" | awk '{print $1}')
+    s3_count=$(aws s3api list-buckets --region "$s3_target_region" --query "Buckets[*].Name" --output text 2>/dev/null | wc -w)
+    
+    echo "   S3 buckets: $s3_count"
+    total_s3_buckets=$((total_s3_buckets + s3_count))
+    s3_workloads=$(( (total_s3_buckets + 10 - 1) / 10 ))
+    if (( total_s3_buckets == 0 )); then s3_workloads=0; fi
+    total_s3_workloads=$((total_s3_workloads + s3_workloads))
+    echo "   $(tput bold)$(tput setaf 2)S3 workloads: $s3_workloads$(tput sgr0)"
+    echo ""
 
-        # List all ECR repositories
-        # The --query 'repositories[].repositoryName' extracts only the names of the repositories
-        # The --output text formats the output as plain text, one name per line
-        repository_names=$(aws ecr describe-repositories --query 'repositories[].repositoryName' --output text)
+    # 7. Count PaaS workloads
+    echo "   Counting up PaaS workloads..."
+    account_efs=0
+    account_aurora=0
+    account_rds=0
+    account_dynamodb=0
+    account_redshift=0
 
-        # Check if any repositories were found
-        if [ -z "$repository_names" ]; then
-        echo "    No ECR repositories found in your AWS account."
-        else
+    for r in $SCAN_REGIONS; do
+        e=$(aws efs describe-file-systems --region "$r" --query "FileSystems[*].FileSystemId" --output text 2>/dev/null | wc -w)
+        account_efs=$((account_efs + e))
+        
+        a=$(aws rds describe-db-clusters --region "$r" --query "DBClusters[?Engine=='aurora'].DBClusterIdentifier" --output text 2>/dev/null | wc -w)
+        account_aurora=$((account_aurora + a))
+        
+        rd=$(aws rds describe-db-instances --region "$r" --query "DBInstances[?Engine=='mysql' || Engine=='mariadb' || Engine=='postgres'].DBInstanceIdentifier" --output text 2>/dev/null | wc -w)
+        account_rds=$((account_rds + rd))
+        
+        d=$(aws dynamodb list-tables --region "$r" --query "TableNames" --output text 2>/dev/null | wc -w)
+        account_dynamodb=$((account_dynamodb + d))
+        
+        rs=$(aws redshift describe-clusters --region "$r" --query "Clusters[*].ClusterIdentifier" --output text 2>/dev/null | wc -w)
+        account_redshift=$((account_redshift + rs))
+    done
 
-            # Loop through each repository name
-            for repo_name in $repository_names; do
-            #echo "Repository: $repo_name"
+    echo "   EFS file systems: $account_efs"
+    echo "   Aurora clusters: $account_aurora"
+    echo "   RDS instances: $account_rds"
+    echo "   DynamoDB tables: $account_dynamodb"
+    echo "   Redshift clusters: $account_redshift"
 
-            # Count images in the current repository
-            # We use describe-images to get a list of image digests (unique identifiers for images).
-            # We then use wc -l to count the number of lines, which corresponds to the number of images.
-            # The || true part prevents the script from exiting if a repository has no images and describe-images returns an empty list.
-            image_count=$(aws ecr describe-images --repository-name "$repo_name" --query 'imageDetails[].imageDigest' --output text | wc -l)
+    total_rds=$((total_rds + account_rds))
+    total_aurora=$((total_aurora + account_aurora))
+    total_dynamodb=$((total_dynamodb + account_dynamodb))
+    total_redshift=$((total_redshift + account_redshift))
 
-            # Add the current repository's image count to the total
-            total_images_across_all_registries=$((total_images_across_all_registries + image_count))
-            container_image_workload=$[(image_count-((ec2_count+total_eks_nodes)*10))]
-            container_image_workload=$(( variable < 0 ? 0 : variable ))
-            total_container_image_workload=$((total_container_image_workload + container_image_workload))
-                done
+    paas_workloads=$(( (account_rds + account_aurora + account_dynamodb + account_redshift + 2 - 1) / 2 ))
+    if (( (account_rds + account_aurora + account_dynamodb + account_redshift) == 0 )); then
+        paas_workloads=0
+    fi
+    total_paas_workloads=$((total_paas_workloads + paas_workloads))
+    echo "   $(tput bold)$(tput setaf 2)PaaS Workloads: $paas_workloads$(tput sgr0)"
 
-            echo "  Total ECR Repositories Found: $(echo "$repository_names" | wc -l)"
-            echo "  Total Images Across All Registries: $total_images_across_all_registries"
-        fi
-        echo "  $(tput bold)$(tput setaf 2)Container Image Workloads: $total_container_image_workload$(tput sgr0)"
-        echo ""
-
-        # Count S3 buckets
-        echo "  Counting up bucket workloads..."
-        if [[ "${REGION}" ]]; then
-            s3_count=$(aws s3api list-buckets --region $REGION --query "Buckets[*].Name" --output text | wc -w)
-            check_error $? "Failed to list S3 buckets in region $REGION for account $account_id."
-        else
-            s3_count=$(aws s3api list-buckets --query "Buckets[*].Name" --output text | wc -w)
-            check_error $? "Failed to list S3 buckets (all regions) for account $account_id."
-        fi   
-        echo "    S3 buckets: $s3_count"
-        total_s3_buckets=$((total_s3_buckets + s3_count))
-        s3_workloads=$[(total_s3_buckets+10-1)/10]
-        if (( total_s3_buckets=0 )); then
-            s3_workloads=0
-        fi
-        total_s3_workloads=$((total_s3_workloads + s3_workloads))
-        echo "  $(tput bold)$(tput setaf 2)S3 workloads: $s3_workloads$(tput sgr0)"
-        echo ""
-
-        echo "  Counting up PaaS workloads..."
-        # Count EFS file systems
-        if [[ "${REGION}" ]]; then
-            efs_count=$(aws efs describe-file-systems --region $REGION --query "FileSystems[*].FileSystemId" --output text | wc -w)
-            check_error $? "Failed to describe EFS file systems in region $REGION for account $account_id."
-        else
-            efs_count=$(aws efs describe-file-systems --query "FileSystems[*].FileSystemId" --output text | wc -w)
-            check_error $? "Failed to describe EFS file systems (all regions) for account $account_id."
-        fi  
-        echo "    EFS file systems: $efs_count"
-        total_efs=$((total_efs + efs_count))
-
-        # Count Aurora clusters
-        if [[ "${REGION}" ]]; then
-            aurora_count=$(aws rds describe-db-clusters --region $REGION --query "DBClusters[?Engine=='aurora'].DBClusterIdentifier" --output text | wc -w)
-            check_error $? "Failed to describe Aurora clusters in region $REGION for account $account_id."
-        else
-            aurora_count=$(aws rds describe-db-clusters --query "DBClusters[?Engine=='aurora'].DBClusterIdentifier" --output text | wc -w)
-            check_error $? "Failed to describe Aurora clusters (all regions) for account $account_id."
-        fi         
-        echo "    Aurora clusters: $aurora_count"
-        total_aurora=$((total_aurora + aurora_count))
-
-        # Count RDS instances
-        if [[ "${REGION}" ]]; then
-            rds_count=$(aws rds describe-db-instances --region $REGION --query "DBInstances[?Engine=='mysql' || Engine=='mariadb' || Engine=='postgres'].DBInstanceIdentifier" --output text | wc -w)
-            check_error $? "Failed to describe RDS instances in region $REGION for account $account_id."
-        else
-            rds_count=$(aws rds describe-db-instances --query "DBInstances[?Engine=='mysql' || Engine=='mariadb' || Engine=='postgres'].DBInstanceIdentifier" --output text | wc -w)
-            check_error $? "Failed to describe RDS instances (all regions) for account $account_id."
-        fi   
-        echo "    RDS instances (MySQL, MariaDB, PostgreSQL): $rds_count"
-        total_rds=$((total_rds + rds_count))
-
-        # Count DynamoDB tables
-        if [[ "${REGION}" ]]; then
-            dynamodb_count=$(aws dynamodb list-tables --region $REGION --query "TableNames" --output text | wc -w)
-            check_error $? "Failed to list DynamoDB tables in region $REGION for account $account_id."
-        else
-            dynamodb_count=$(aws dynamodb list-tables --query "TableNames" --output text | wc -w)
-            check_error $? "Failed to list DynamoDB tables (all regions) for account $account_id."
-        fi 
-        echo "    DynamoDB tables: $dynamodb_count"
-        total_dynamodb=$((total_dynamodb + dynamodb_count))
-
-        # Count Redshift clusters
-        if [[ "${REGION}" ]]; then
-            redshift_count=$(aws redshift describe-clusters --region $REGION --query "Clusters[*].ClusterIdentifier" --output text | wc -w)
-            check_error $? "Failed to describe Redshift clusters in region $REGION for account $account_id."
-        else
-            redshift_count=$(aws redshift describe-clusters --query "Clusters[*].ClusterIdentifier" --output text | wc -w)
-            check_error $? "Failed to describe Redshift clusters (all regions) for account $account_id."
-        fi 
-        echo "    Redshift clusters: $redshift_count"
-        total_redshift=$((total_redshift + redshift_count))
-
-        paas_workloads=$[((total_rds + total_aurora + total_dynamodb + total_redshift)+2-1)/2]
-        total_paas_workloads=$((total_paas_workloads + paas_workloads))
-        if [[ $total_rds+$total_aurora+$total_dynamodb+$total_redshift=0 ]]; then
-            paas_workloads=0
-        fi
-        echo "  $(tput bold)$(tput setaf 2)PaaS Workloads: $paas_workloads$(tput sgr0)"
-
-    # Unset temporary credentials only if they were successfully set
-    if [ "$ORG_MODE" == true ] && [ -n "$AWS_SESSION_TOKEN" ]; then
-        # Unset temporary credentials
-        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    # Unset temporary credentials
+    if [ "$ORG_MODE" == true ]; then
+        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
     fi
 }
 
 # Main logic
 if [ "$ORG_MODE" == true ]; then
-    # Get the list of all accounts in the AWS Organization
-    # Filter for ACTIVE accounts only
-    accounts=$(aws organizations list-accounts --query "Accounts[?Status=='ACTIVE'].Id" --output text)
-    check_error $? "Failed to list accounts in the organization. Ensure you have 'organizations:ListAccounts' permission."
+    sso_session_info=$(python3 -c "
+import os, json, glob, datetime
+
+def find_sso_session():
+    sso_cache_dir = os.path.expanduser('~/.aws/sso/cache')
+    if not os.path.isdir(sso_cache_dir):
+        return None
+
+    # Sort files by modification time, newest first
+    json_files = sorted(glob.glob(os.path.join(sso_cache_dir, '*.json')), key=os.path.getmtime, reverse=True)
+    
+    for file_path in json_files:
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+                
+            # Check for a valid, non-expired accessToken
+            if 'accessToken' in data and 'expiresAt' in data:
+                # AWS CLI cache uses UTC (e.g., '2025-02-27T17:03:00UTC')
+                # A simple string comparison often works if we format current time similarly,
+                # but a robust check handles the 'UTC' or 'Z' suffix.
+                exp_str = data['expiresAt'].replace('UTC', '').replace('Z', '')
+                try:
+                    exp_time = datetime.datetime.strptime(exp_str, '%Y-%m-%dT%H:%M:%S')
+                except ValueError:
+                    continue # Skip if date format is unexpected
+
+                if exp_time > datetime.datetime.utcnow():
+                    # We found a valid token. Now we need the corresponding region.
+                    # This script relies on SSO_REGION being available, which is sometimes in the cache
+                    # or needs to be derived. The original script used a Python snippet that
+                    # expected region in the cache or provided as fallback.
+                    region = data.get('region', '')
+                    start_url = data.get('startUrl', '')
+                    return f\"{data['accessToken']}\\t{region}\\t{start_url}\"
+        except Exception:
+            continue
+    return None
+
+result = find_sso_session()
+if result:
+    print(result)
+" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$sso_session_info" ]; then
+        echo "Error: No valid cached AWS SSO login token found."
+        print_sso_login_hint
+        exit 1
+    fi
+
+    IFS=$'\t' read -r SSO_ACCESS_TOKEN SSO_REGION SSO_START_URL <<< "$sso_session_info"
+
+    if [ -z "$SSO_ACCESS_TOKEN" ] || [ -z "$SSO_REGION" ]; then
+        echo "Error: Cached AWS SSO login token is missing an access token or SSO region."
+        # If the region was missing in the cache JSON, we can try to fallback to AWS_REGION if set
+        if [ -n "$AWS_REGION" ] && [ -n "$SSO_ACCESS_TOKEN" ]; then
+            SSO_REGION="$AWS_REGION"
+            echo "Falling back to SSO Region from environment: $SSO_REGION"
+        elif [ -n "$AWS_DEFAULT_REGION" ] && [ -n "$SSO_ACCESS_TOKEN" ]; then
+            SSO_REGION="$AWS_DEFAULT_REGION"
+            echo "Falling back to SSO Region from environment: $SSO_REGION"
+        else
+            print_sso_login_hint
+            exit 1
+        fi
+    fi
+
+    if [ -n "$SSO_START_URL" ]; then
+        echo "Using cached AWS SSO session for $SSO_START_URL in $SSO_REGION"
+    else
+        echo "Using cached AWS SSO session in $SSO_REGION"
+    fi
+
+    # Get the list of accounts assigned to the cached SSO login.
+    accounts=$(aws sso list-accounts --access-token "$SSO_ACCESS_TOKEN" --region "$SSO_REGION" --query "accountList[].accountId" --output text 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to list accounts from AWS SSO."
+        print_sso_login_hint
+        exit 1
+    fi
 
     if [ -z "$accounts" ]; then
-        echo "No accounts found in the organization."
+        echo "No accounts found for the cached AWS SSO login."
         exit 0
     fi
 
-    # Loop through each account in the organization
+    # Loop through each SSO-assigned account.
     for account_id in $accounts; do
         count_resources "$account_id"
     done
@@ -481,14 +467,14 @@ else
     count_resources "$current_account"
 fi
 
-    echo ""
-    echo "  -- AWS WORKLOAD COUNTS --"
-    echo "     VM workloads: $total_ec2_instances"
-    echo "     VM (container) workloads: $total_eks_workloads"
-    echo "     Serverless workloads: $total_serverless_workloads"
-    echo "     S3 workloads: $total_s3_workloads"
-    echo "     CaaS workloads: $total_caas_workloads"
-    echo "     Container Image workloads: $total_container_image_workloads"
-    echo "     PaaS workloads: $total_paas_workloads"  
-    echo ""
-    echo "$(tput bold)$(tput setaf 2)** SUM TOTAL AWS WORKLOADS: $((total_ec2_instances+total_eks_workloads+total_serverless_workloads+total_s3_workloads+total_caas_workloads+total_container_image_workloads+total_paas_workloads)) **$(tput sgr0)"
+echo ""
+echo " -- AWS WORKLOAD COUNTS --"
+echo " VM workloads: $total_ec2_instances"
+echo " VM (container) workloads: $total_eks_workloads"
+echo " Serverless workloads: $total_serverless_workloads"
+echo " S3 workloads: $total_s3_workloads"
+echo " CaaS workloads: $total_caas_workloads"
+echo " Container Image workloads: $total_container_image_workloads"
+echo " PaaS workloads: $total_paas_workloads" 
+echo ""
+echo "$(tput bold)$(tput setaf 2)** SUM TOTAL AWS WORKLOADS: $((total_ec2_instances+total_eks_workloads+total_serverless_workloads+total_s3_workloads+total_caas_workloads+total_container_image_workloads+total_paas_workloads)) **$(tput sgr0)"
